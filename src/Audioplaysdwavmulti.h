@@ -68,38 +68,47 @@ public:
     // ── Loop region ───────────────────────────────────────────
     // Define a loop region by start/end ms.
     // loopEnd=0 means loop to end of file.
-    // Call setLoop(0, 0) to loop the whole file.
-    // Call setLoop(0, 0, false) to disable looping.
+    // Safe to call from main loop — values are read atomically.
     void setLoop(uint32_t startMs, uint32_t endMs, bool enabled = true) {
-        _loopEnabled = enabled;
+        // Write order matters: set start/end before enabling
         _loopStartMs = startMs;
-        _loopEndMs   = endMs;   // 0 = use file end
+        _loopEndMs   = endMs;
+        _stopAtEnd   = false;
+        _loopEnabled = enabled;
+    }
+
+    // Play the region once — stop (not loop) when loopEndMs is reached
+    void setPlayOnce(uint32_t startMs, uint32_t endMs) {
+        _loopStartMs = startMs;
+        _loopEndMs   = endMs;
+        _stopAtEnd   = true;
+        _loopEnabled = true;
     }
 
     // ── Seeking ───────────────────────────────────────────────
 
-    // Seek to a position in milliseconds
-    // Call seekMs() then optionally crossfade via the mixer gains
-    bool seekMs(uint32_t ms) {
-        if (!_file || !_playing) return false;
+    // Seek to a position in milliseconds.
+    // SAFE TO CALL FROM MAIN LOOP — deferred to next update() ISR tick.
+    void seekMs(uint32_t ms) {
+        _seekPending   = true;
+        _seekTargetMs  = ms;
+    }
 
-        // Convert ms to byte offset within data chunk
-        // bytes = ms * byteRate / 1000, aligned to frame boundary
+    // Internal: actually performs the seek inside the audio ISR
+    void _doSeek(uint32_t ms) {
+        if (!_file || !_playing) return;
+
         uint32_t targetByte = (uint32_t)((float)ms / 1000.0f * _byteRate);
-        // Align to frame boundary (frame = channels * bytesPerSample)
-        uint32_t frameSize = _channels * (_bitsPerSample / 8);
+        uint32_t frameSize  = _channels * (_bitsPerSample / 8);
         targetByte = (targetByte / frameSize) * frameSize;
-        // Clamp to data chunk
         if (targetByte > _dataSize) targetByte = 0;
 
         uint32_t filePos = _dataOffset + targetByte;
         if (!_file.seek(filePos)) {
             Serial.printf("[WavMulti] seek failed to byte %lu\n", filePos);
-            return false;
+            return;
         }
         _dataRead = targetByte;
-        Serial.printf("[WavMulti] Seeked to %lu ms (byte %lu)\n", ms, filePos);
-        return true;
     }
 
     // ── Position / length ─────────────────────────────────────
@@ -150,11 +159,21 @@ public:
         // Read into temporary buffer
         // Max frame: 6ch * 2 bytes * 128 samples = 1536 bytes
         static int16_t readBuf[AUDIO_BLOCK_SAMPLES * NUM_CHANNELS];
+        // Handle deferred seek (requested from main loop, executed here in ISR)
+        if (_seekPending) {
+            _seekPending = false;
+            _doSeek(_seekTargetMs);
+        }
+
         // Check loop end point before reading
         if (_loopEnabled) {
             uint32_t loopEnd = (_loopEndMs > 0) ? _loopEndMs : lengthMs();
             if (positionMs() >= loopEnd) {
-                seekMs(_loopStartMs);
+                if (_stopAtEnd) {
+                    _playing = false;  // end of final chapter — stop cleanly
+                } else {
+                    _doSeek(_loopStartMs);
+                }
             }
         }
 
@@ -296,6 +315,9 @@ private:
     bool       _loopEnabled   = false;
     uint32_t   _loopStartMs   = 0;
     uint32_t   _loopEndMs     = 0;     // 0 = use file end
+    volatile bool     _seekPending  = false;
+    volatile uint32_t _seekTargetMs = 0;
+    bool              _stopAtEnd    = false;  // stop instead of loop at loopEndMs
 
     uint16_t   _channels      = 0;
     uint32_t   _sampleRate    = 0;

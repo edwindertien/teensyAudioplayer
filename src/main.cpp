@@ -6,6 +6,7 @@
 #include "AudioPlaySdWavMulti.h"
 #include "RamPlayer.h"
 #include "ConfigLoader.h"
+#include "LedAnimator.h"
 
 // ── Audio graph ───────────────────────────────────────────────
 AudioPlaySdWavMulti   multiPlayer;
@@ -37,6 +38,7 @@ AudioConnection  pHaptic (multiPlayer, 3, hapticMixer, 0);
 AudioConnection  pHapOut (hapticMixer, 0, pwmOut,      0);
 
 // ── NFC ───────────────────────────────────────────────────────
+LedAnimator leds;
 MFRC522 nfc(0x28, 9);
 
 // ── Config ────────────────────────────────────────────────────
@@ -58,6 +60,8 @@ SeekState  seekState    = SeekState::IDLE;
 uint32_t   seekTargetMs = 0;
 float      stemGain     = 1.0f;
 #define    SEEK_FADE_STEP 0.05f
+
+bool          experienceStarted = false;
 
 elapsedMillis gainRampTimer;
 elapsedMillis nfcPollTimer;
@@ -99,8 +103,15 @@ void goToChapter(const char* id) {
     seekState      = SeekState::FADE_OUT;
     if (ch->onEnterFx >= 0) ramFx.play(ch->onEnterFx);
     applyOverlayDefaults(*ch);
-    multiPlayer.setLoop(ch->startMs, ch->loopEndMs);
-    Serial.printf("[Chapter] -> '%s' (%s)\n", ch->id, ch->label);
+    if (ch->looping) {
+        multiPlayer.setLoop(ch->startMs, ch->loopEndMs);
+        Serial.printf("[Chapter] -> '%s' LOOP %lu-%lu ms\n", ch->id, ch->startMs, ch->loopEndMs);
+    } else {
+        multiPlayer.setPlayOnce(ch->startMs, ch->loopEndMs);
+        Serial.printf("[Chapter] -> '%s' ONCE %lu-%lu ms\n", ch->id, ch->startMs, ch->loopEndMs);
+    }
+    leds.setBackgroundFromParams(ch->ledBackground);
+    leds.triggerForegroundFromParams(ch->ledEnter);
 }
 
 void applyOverlayAction(const char* target, OverlayValue val) {
@@ -117,6 +128,36 @@ void applyOverlayAction(const char* target, OverlayValue val) {
     Serial.printf("[Overlay] %s -> %.0f\n", target, *tgt);
 }
 
+void returnToIdle() {
+    experienceStarted = false;
+    currentChapter    = nullptr;
+    // Reset overlay gains
+    ov1Target = 0.0f; ov2Target = 0.0f; narrTarget = 0.0f;
+    // Stop audio cleanly
+    multiPlayer.stop();
+    // Return to idle LED
+    LedParams idle;
+    strlcpy(idle.animation, cfg.idleLed.animation, sizeof(idle.animation));
+    idle.color     = cfg.idleLed.color;
+    idle.intensity = cfg.idleLed.intensity;
+    idle.speed     = cfg.idleLed.speed;
+    leds.setBackgroundFromParams(idle);
+    Serial.println("[Idle] Experience ended — waiting for tag tap");
+}
+
+void startExperience() {
+    if (experienceStarted) return;
+    experienceStarted = true;
+    // Just start the audio — dispatchTag() runs immediately after
+    // and calls goToChapter() which sets loop, LED, overlays
+    if (!multiPlayer.play(EXPERIENCE_FILE)) {
+        Serial.println("[Audio] ERROR: experience.wav not found");
+        experienceStarted = false;
+        return;
+    }
+    Serial.println("[Audio] Experience started");
+}
+
 void dispatchTag(const TagConfig& tag) {
     Serial.printf("[NFC] '%s' (%s)\n", tag.label, tag.uid);
     for (uint8_t i = 0; i < tag.actionCount; i++) {
@@ -125,6 +166,7 @@ void dispatchTag(const TagConfig& tag) {
             case ActionType::CHAPTER: goToChapter(a.target); break;
             case ActionType::OVERLAY: applyOverlayAction(a.target, a.overlayValue); break;
             case ActionType::FX:      if (a.fxSlot >= 0) ramFx.play(a.fxSlot); break;
+            case ActionType::LED:      leds.triggerForegroundFromParams(a.ledParams); break;
         }
     }
 }
@@ -161,6 +203,7 @@ void setup() {
     delay(500);
     Serial.println("=== Interactive Audio Player ===");
 
+    leds.begin();
     AudioMemory(40);
     codec.enable();
     codec.volume(0.7);
@@ -189,16 +232,14 @@ void setup() {
     ramFx.load(3, "fx_boot.wav");
     ramFx.printMemoryUsage();
 
-    if (!multiPlayer.play(EXPERIENCE_FILE))
-        Serial.println("[Audio] ERROR: experience.wav not found");
-
-    const ChapterConfig* startCh = ConfigLoader::findChapter(cfg.startChapter, cfg);
-    if (startCh) {
-        currentChapter = startCh;
-        multiPlayer.setLoop(startCh->startMs, startCh->loopEndMs);
-        applyOverlayDefaults(*startCh);
-        Serial.printf("[Chapter] Start: '%s'\n", startCh->label);
-    }
+    // Start in idle — audio begins on first NFC tag tap
+    Serial.println("[Idle] Waiting for first tag tap...");
+    LedParams idle;
+    strlcpy(idle.animation, cfg.idleLed.animation, sizeof(idle.animation));
+    idle.color     = cfg.idleLed.color;
+    idle.intensity = cfg.idleLed.intensity;
+    idle.speed     = cfg.idleLed.speed;
+    leds.setBackgroundFromParams(idle);
 
     Wire.begin();
     Wire.setClock(400000);
@@ -212,6 +253,8 @@ void setup() {
 
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
+
+    leds.update();
 
     if (gainRampTimer >= 20) {
         gainRampTimer = 0;
@@ -242,13 +285,24 @@ void loop() {
         }
     }
 
+    // Detect end of non-looping chapter → return to idle
+    if (experienceStarted &&
+        currentChapter && !currentChapter->looping &&
+        seekState == SeekState::IDLE &&
+        !multiPlayer.isPlaying()) {
+        returnToIdle();
+    }
+
     if (nfcPollTimer >= 150) {
         nfcPollTimer = 0;
         if (nfc.PICC_IsNewCardPresent() && nfc.PICC_ReadCardSerial()) {
             char uid[20];
             uidToString(uid);
             const TagConfig* tag = ConfigLoader::findTag(uid, cfg);
-            if (tag) dispatchTag(*tag);
+            if (tag) {
+                if (!experienceStarted) startExperience();
+                dispatchTag(*tag);
+            }
             else Serial.printf("[NFC] Unknown: %s — add to config.json\n", uid);
             nfc.PICC_HaltA();
             nfc.PCD_StopCrypto1();

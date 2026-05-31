@@ -10,6 +10,7 @@
 
 #include <SD.h>
 #include <ArduinoJson.h>
+#include "LedAnimator.h"
 
 // ── Limits ───────────────────────────────────────────────────
 static constexpr uint8_t MAX_CHAPTERS  = 16;
@@ -21,6 +22,7 @@ enum class ActionType : uint8_t {
     CHAPTER,    // seek to chapter, apply its settings
     OVERLAY,    // set ov1 / ov2 / narr to on/off/toggle
     FX,         // play a RAM FX slot
+    LED,        // trigger a foreground LED animation
 };
 
 enum class OverlayValue : uint8_t { ON, OFF, TOGGLE };
@@ -30,6 +32,7 @@ struct Action {
     char         target[16];    // chapter id  OR  "ov1"/"ov2"/"narr"
     OverlayValue overlayValue;  // for OVERLAY actions
     int8_t       fxSlot;        // for FX actions (-1 = none)
+    LedParams    ledParams;     // for LED actions
 };
 
 // ── Overlay defaults for a chapter ───────────────────────────
@@ -53,6 +56,9 @@ struct ChapterConfig {
     int8_t          onEnterFx   = -1;   // RAM FX slot, -1 = none
     OverlayMode     overlayMode = OverlayMode::FRESH;
     OverlayDefaults overlays;
+    bool            looping     = true; // false = play once then return to idle
+    LedParams       ledBackground;      // looping LED animation for this chapter
+    LedParams       ledEnter;           // one-shot LED animation on chapter entry
 };
 
 // ── Tag ──────────────────────────────────────────────────────
@@ -70,6 +76,7 @@ struct TagConfig {
 struct ExperienceConfig {
     char          deviceId[16]      = "UNIT_01";
     char          startChapter[16]  = "intro";
+    LedParams     idleLed;           // animation shown before experience starts
     ChapterConfig chapters[MAX_CHAPTERS];
     uint8_t       chapterCount      = 0;
     TagConfig     tags[MAX_TAGS];
@@ -98,6 +105,17 @@ public:
         strlcpy(cfg.deviceId,      doc["device_id"]     | "UNIT_01", sizeof(cfg.deviceId));
         strlcpy(cfg.startChapter,  doc["start_chapter"] | "intro",   sizeof(cfg.startChapter));
 
+        // Idle LED — defaults to very dim slow breathe
+        JsonObject idleLed = doc["idle"]["led"];
+        if (!idleLed.isNull()) {
+            parseLedParams(idleLed, cfg.idleLed);
+        } else {
+            strlcpy(cfg.idleLed.animation, "breathe", sizeof(cfg.idleLed.animation));
+            cfg.idleLed.color     = 0x001133;
+            cfg.idleLed.intensity = 0.12f;
+            cfg.idleLed.speed     = 0.15f;
+        }
+
         // ── Chapters ─────────────────────────────────────────
         cfg.chapterCount = 0;
         for (JsonObject ch : doc["chapters"].as<JsonArray>()) {
@@ -114,12 +132,34 @@ public:
             c.overlayMode = (strcmp(mode, "keep") == 0)
                             ? OverlayMode::KEEP
                             : OverlayMode::FRESH;
+            // Use explicit check — ArduinoJson's | operator treats false as "missing"
+            c.looping = ch.containsKey("loop") ? ch["loop"].as<bool>() : true;
 
             JsonObject ov = ch["overlays"];
             if (!ov.isNull()) {
                 c.overlays.ov1  = ov["ov1"]  | false;
                 c.overlays.ov2  = ov["ov2"]  | false;
                 c.overlays.narr = ov["narr"] | false;
+            }
+
+            // LED background animation
+            JsonObject ledBg = ch["led_background"];
+            if (!ledBg.isNull()) parseLedParams(ledBg, c.ledBackground);
+            else {
+                strlcpy(c.ledBackground.animation, "breathe", 20);
+                c.ledBackground.color = 0x0044FF;
+                c.ledBackground.intensity = 0.6f;
+                c.ledBackground.speed = 0.3f;
+            }
+            // LED enter animation (one-shot)
+            JsonObject ledEn = ch["led_enter"];
+            if (!ledEn.isNull()) parseLedParams(ledEn, c.ledEnter);
+            else {
+                strlcpy(c.ledEnter.animation, "flash", 20);
+                c.ledEnter.color = 0xFFFFFF;
+                c.ledEnter.intensity = 1.0f;
+                c.ledEnter.speed = 0.8f;
+                c.ledEnter.durationMs = 800;
             }
         }
 
@@ -158,6 +198,10 @@ public:
                 } else if (strcmp(doStr, "fx") == 0) {
                     a.type   = ActionType::FX;
                     a.fxSlot = act["slot"] | -1;
+
+                } else if (strcmp(doStr, "led") == 0) {
+                    a.type = ActionType::LED;
+                    parseLedParams(act, a.ledParams);
                 }
             }
         }
@@ -165,6 +209,15 @@ public:
         Serial.printf("[Config] Loaded: %u chapters, %u tags, device=%s\n",
                       cfg.chapterCount, cfg.tagCount, cfg.deviceId);
         return true;
+    }
+
+    static void parseLedParams(JsonObjectConst obj, LedParams& p) {
+        strlcpy(p.animation, obj["animation"] | "breathe", sizeof(p.animation));
+        const char* colorStr = obj["color"] | "0x0044FF";
+        p.color     = (uint32_t)strtoul(colorStr, nullptr, 16);
+        p.intensity = obj["intensity"] | 0.7f;
+        p.speed     = obj["speed"]     | 0.4f;
+        p.durationMs= obj["duration_ms"]| 0;
     }
 
     // Find a chapter by id
