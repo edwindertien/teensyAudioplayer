@@ -1,0 +1,102 @@
+{
+  "_note": "Edit this file to define the experience. No reflashing needed.",
+  "_note2": "Tag UIDs: open serial monitor, tap a tag, UID prints as [NFC] Tag: XXXXXXXX",
+
+  "device_id": "UNIT_01",
+  "_device_id_note": "Unique per unit. Change to UNIT_02, UNIT_03 etc for other devices.",
+
+  "start_chapter": "intro",
+
+  "chapters": [
+    {
+      "id":           "intro",
+      "label":        "Chapter 1 — Introduction",
+      "start_ms":     0,
+      "loop_end_ms":  32000,
+      "on_enter_fx":  -1,
+      "_overlay_mode_note": "fresh = apply defaults below on entry | keep = leave overlays as-is",
+      "overlay_mode": "fresh",
+      "overlays": {
+        "ov1":  false,
+        "ov2":  false,
+        "narr": false
+      }
+    },
+    {
+      "id":           "cave",
+      "label":        "Chapter 2 — The Cave",
+      "start_ms":     32000,
+      "loop_end_ms":  64000,
+      "on_enter_fx":  1,
+      "overlay_mode": "fresh",
+      "overlays": {
+        "ov1":  true,
+        "ov2":  false,
+        "narr": false
+      }
+    },
+    {
+      "id":           "river",
+      "label":        "Chapter 3 — The River",
+      "start_ms":     64000,
+      "loop_end_ms":  96000,
+      "on_enter_fx":  0,
+      "_overlay_mode_note": "keep = carry over whatever was active in previous chapter",
+      "overlay_mode": "keep",
+      "overlays": {
+        "ov1":  false,
+        "ov2":  true,
+        "narr": true
+      }
+    }
+  ],
+
+  "tags": [
+    {
+      "_note": "--- REPLACE UIDs BELOW with your actual tag UIDs from serial monitor ---",
+
+      "uid":   "DE0CC698",
+      "label": "Location tag: go to Chapter 1",
+      "type":  "location",
+      "actions": [
+        { "do": "chapter", "target": "intro" }
+      ]
+    },
+    {
+      "uid":   "AE8BD4A0",
+      "label": "Location tag: go to Chapter 2",
+      "type":  "location",
+      "actions": [
+        { "do": "chapter", "target": "cave" }
+      ]
+    },
+    {
+      "uid":   "3A4E4EEE",
+      "label": "Location tag: go to Chapter 3",
+      "type":  "location",
+      "actions": [
+        { "do": "chapter", "target": "river" }
+      ]
+    },
+    {
+      "_note": "Optional 4th tag — toggles overlay 1",
+      "uid":   "04694C3A051F90",
+      "label": "Toggle overlay 1",
+      "type":  "location",
+      "actions": [
+        { "do": "overlay", "target": "ov1", "value": "toggle" },
+        { "do": "fx",      "slot": 0 }
+      ]
+    },
+    {
+      "_note": "Device-to-device tag — fill in the UID of the OTHER unit's sticker",
+      "uid":   "DEVICE_UID_OTHER",
+      "label": "Meeting another player device",
+      "type":  "device",
+      "actions": [
+        { "do": "fx",      "slot": 0 },
+        { "do": "overlay", "target": "ov2", "value": "toggle" }
+      ]
+    }
+  ]
+}
