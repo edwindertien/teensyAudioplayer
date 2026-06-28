@@ -2,7 +2,7 @@
 #include <Audio.h>
 #include <Wire.h>
 #include <SD.h>
-#include <MFRC522_I2C.h>
+#include "NfcReader.h"
 #include "AudioPlaySdWavMulti.h"
 #include "RamPlayer.h"
 #include "ConfigLoader.h"
@@ -15,6 +15,7 @@ AudioMixer4           stemMixerR;
 AudioMixer4           mainMixerL;
 AudioMixer4           mainMixerR;
 AudioMixer4           hapticMixer;
+AudioAnalyzePeak      hapticPeak;
 AudioOutputI2S        i2sOut;
 AudioOutputPWM        pwmOut;
 AudioControlSGTL5000  codec;
@@ -36,10 +37,11 @@ AudioConnection  pOutL   (mainMixerL,  0, i2sOut,     0);
 AudioConnection  pOutR   (mainMixerR,  0, i2sOut,     1);
 AudioConnection  pHaptic (multiPlayer, 3, hapticMixer, 0);
 AudioConnection  pHapOut (hapticMixer, 0, pwmOut,      0);
+AudioConnection  pHapPeak(hapticMixer, 0, hapticPeak,  0);
 
 // ── NFC ───────────────────────────────────────────────────────
 LedAnimator leds;
-MFRC522 nfc(0x28, 9);
+NfcReader nfc;
 
 // ── Config ────────────────────────────────────────────────────
 #define LED_PIN          13
@@ -66,6 +68,8 @@ bool          experienceStarted = false;
 elapsedMillis gainRampTimer;
 elapsedMillis nfcPollTimer;
 elapsedMillis statusTimer;
+uint16_t      _nfcPollInterval = 164;   // ms between NFC polls, set from sensitivity
+elapsedMillis tagCooldown[MAX_TAGS];  // per-tag retrigger cooldown
 char    serialBuf[32] = {};
 uint8_t serialPos = 0;
 
@@ -73,12 +77,6 @@ uint8_t serialPos = 0;
 float stepGain(float cur, float tgt) {
     if (fabsf(cur - tgt) <= GAIN_STEP) return tgt;
     return cur + (tgt > cur ? GAIN_STEP : -GAIN_STEP);
-}
-
-void uidToString(char* out) {
-    for (byte i = 0; i < nfc.uid.size; i++)
-        sprintf(out + (i * 2), "%02X", nfc.uid.uidByte[i]);
-    out[nfc.uid.size * 2] = '\0';
 }
 
 void applyOverlayDefaults(const ChapterConfig& ch) {
@@ -112,6 +110,7 @@ void goToChapter(const char* id) {
     }
     leds.setBackgroundFromParams(ch->ledBackground);
     leds.triggerForegroundFromParams(ch->ledEnter);
+    leds.setBeatFromParams(ch->ledBeat);
 }
 
 void applyOverlayAction(const char* target, OverlayValue val) {
@@ -142,6 +141,10 @@ void returnToIdle() {
     idle.intensity = cfg.idleLed.intensity;
     idle.speed     = cfg.idleLed.speed;
     leds.setBackgroundFromParams(idle);
+    // Transducer ring: slow heartbeat in idle
+    LedParams idleBeat; strlcpy(idleBeat.animation,"heartbeat",20);
+    idleBeat.color=0x220000; idleBeat.intensity=0.2f; idleBeat.speed=0.4f;
+    leds.setBeatFromParams(idleBeat);
     Serial.println("[Idle] Experience ended — waiting for tag tap");
 }
 
@@ -191,8 +194,26 @@ void handleSerialCommand(const char* cmd) {
             Serial.printf("  [%u] %s '%s' %u actions\n",
                 i, t.uid, t.label, t.actionCount);
         }
+    } else if (strcmp(cmd, "nfc") == 0) {
+        // Debug: print which reader is compiled in and force a poll
+#ifdef USE_PN532
+        Serial.println("[NFC] Reader: PN532 (USE_PN532 defined)");
+#else
+        Serial.println("[NFC] Reader: WS1850S / MFRC522 (default)");
+#endif
+        Serial.println("[NFC] Forcing poll — tap a tag now...");
+        char uid[20] = {};
+        bool found = false;
+        uint32_t t0 = millis();
+        while (millis() - t0 < 3000) {   // 3 second window
+            if (nfc.poll(uid)) { found = true; break; }
+            delay(100);
+        }
+        if (found) Serial.printf("[NFC] Found: %s\n", uid);
+        else       Serial.println("[NFC] No tag detected in 3s");
+
     } else {
-        Serial.println("Commands: go <id> | seek <ms> | fx <n> | narr | ov1 | ov2 | chapters | tags");
+        Serial.println("Commands: go <id> | seek <ms> | fx <n> | narr | ov1 | ov2 | chapters | tags | nfc");
     }
 }
 
@@ -240,13 +261,19 @@ void setup() {
     idle.intensity = cfg.idleLed.intensity;
     idle.speed     = cfg.idleLed.speed;
     leds.setBackgroundFromParams(idle);
+    // Transducer ring: slow heartbeat in idle
+    LedParams idleBeat; strlcpy(idleBeat.animation,"heartbeat",20);
+    idleBeat.color=0x220000; idleBeat.intensity=0.2f; idleBeat.speed=0.4f;
+    leds.setBeatFromParams(idleBeat);
 
     Wire.begin();
     Wire.setClock(400000);
-    nfc.PCD_Init();
-    byte ver = nfc.PCD_ReadRegister(MFRC522::VersionReg);
-    Serial.printf("[NFC] %s (0x%02X)\n",
-                  (ver==0x00||ver==0xFF) ? "ERROR: not detected" : "WS1850S ready", ver);
+    nfc.begin();
+    nfc.setSensitivity(cfg.nfcSensitivity);
+    // Adaptive poll interval: give LED frames room to breathe between NFC polls
+    // sensitivity 0→150ms, 3→180ms, 5→220ms
+    _nfcPollInterval = 150 + cfg.nfcSensitivity * 14;
+    Serial.printf("[NFC] Poll interval: %ums\n", _nfcPollInterval);
 
     Serial.println("Type 'chapters' or 'tags' to inspect. Tap NFC tags to navigate.");
 }
@@ -254,6 +281,11 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
 
+    // Drive beat ring from live haptic level — fast attack, slow decay
+    if (hapticPeak.available()) {
+        float peak = hapticPeak.read();
+        leds.setBeatLevel(peak);
+    }
     leds.update();
 
     if (gainRampTimer >= 20) {
@@ -293,19 +325,25 @@ void loop() {
         returnToIdle();
     }
 
-    if (nfcPollTimer >= 150) {
+    if (nfcPollTimer >= _nfcPollInterval) {
         nfcPollTimer = 0;
-        if (nfc.PICC_IsNewCardPresent() && nfc.PICC_ReadCardSerial()) {
-            char uid[20];
-            uidToString(uid);
-            const TagConfig* tag = ConfigLoader::findTag(uid, cfg);
-            if (tag) {
-                if (!experienceStarted) startExperience();
-                dispatchTag(*tag);
+        char uid[20] = {};
+        if (nfc.poll(uid)) {
+            int8_t idx = ConfigLoader::findTagIndex(uid, cfg);
+            if (idx < 0) {
+                Serial.printf("[NFC] Unknown: %s -- add to config.json\n", uid);
+            } else {
+                const TagConfig& tag = cfg.tags[idx];
+                if (tag.cooldownMs > 0 && tagCooldown[idx] < tag.cooldownMs) {
+                    uint32_t remaining = tag.cooldownMs - tagCooldown[idx];
+                    Serial.printf("[NFC] '%s' cooling down (%lums left)\n",
+                                  tag.label, remaining);
+                } else {
+                    tagCooldown[idx] = 0;  // reset cooldown
+                    if (!experienceStarted) startExperience();
+                    dispatchTag(tag);
+                }
             }
-            else Serial.printf("[NFC] Unknown: %s — add to config.json\n", uid);
-            nfc.PICC_HaltA();
-            nfc.PCD_StopCrypto1();
         }
     }
 

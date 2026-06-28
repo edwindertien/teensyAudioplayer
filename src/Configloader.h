@@ -57,8 +57,9 @@ struct ChapterConfig {
     OverlayMode     overlayMode = OverlayMode::FRESH;
     OverlayDefaults overlays;
     bool            looping     = true; // false = play once then return to idle
-    LedParams       ledBackground;      // looping LED animation for this chapter
-    LedParams       ledEnter;           // one-shot LED animation on chapter entry
+    LedParams       ledBackground;      // looping NFC ring animation
+    LedParams       ledEnter;           // one-shot NFC ring animation on chapter entry
+    LedParams       ledBeat;            // transducer ring animation
 };
 
 // ── Tag ──────────────────────────────────────────────────────
@@ -68,6 +69,7 @@ struct TagConfig {
     char        uid[20]     = {};    // uppercase hex, e.g. "04A32B1C"
     char        label[48]   = {};    // human-readable, for debug only
     TagType     type        = TagType::LOCATION;
+    uint32_t    cooldownMs  = 0;     // 0 = no cooldown, else ms before re-trigger allowed
     Action      actions[MAX_ACTIONS];
     uint8_t     actionCount = 0;
 };
@@ -76,6 +78,8 @@ struct TagConfig {
 struct ExperienceConfig {
     char          deviceId[16]      = "UNIT_01";
     char          startChapter[16]  = "intro";
+    uint8_t       ledBrightness     = 160;   // 0-255 global LED scale
+    uint8_t       nfcSensitivity     = 3;     // 0=low range/fast  5=max range/slower
     LedParams     idleLed;           // animation shown before experience starts
     ChapterConfig chapters[MAX_CHAPTERS];
     uint8_t       chapterCount      = 0;
@@ -104,6 +108,8 @@ public:
 
         strlcpy(cfg.deviceId,      doc["device_id"]     | "UNIT_01", sizeof(cfg.deviceId));
         strlcpy(cfg.startChapter,  doc["start_chapter"] | "intro",   sizeof(cfg.startChapter));
+        cfg.ledBrightness   = doc["led_brightness"]   | 160;
+        cfg.nfcSensitivity  = doc["nfc_sensitivity"]  | 3;
 
         // Idle LED — defaults to very dim slow breathe
         JsonObject idleLed = doc["idle"]["led"];
@@ -133,7 +139,7 @@ public:
                             ? OverlayMode::KEEP
                             : OverlayMode::FRESH;
             // Use explicit check — ArduinoJson's | operator treats false as "missing"
-            c.looping = ch.containsKey("loop") ? ch["loop"].as<bool>() : true;
+            c.looping = ch["loop"].is<bool>() ? ch["loop"].as<bool>() : true;
 
             JsonObject ov = ch["overlays"];
             if (!ov.isNull()) {
@@ -161,6 +167,15 @@ public:
                 c.ledEnter.speed = 0.8f;
                 c.ledEnter.durationMs = 800;
             }
+            // Transducer ring animation
+            JsonObject ledBt = ch["led_beat"];
+            if (!ledBt.isNull()) parseLedParams(ledBt, c.ledBeat);
+            else {
+                strlcpy(c.ledBeat.animation, "heartbeat", 20);
+                c.ledBeat.color = 0xFF2200;
+                c.ledBeat.intensity = 0.6f;
+                c.ledBeat.speed = 0.5f;
+            }
         }
 
         // ── Tags ─────────────────────────────────────────────
@@ -176,6 +191,7 @@ public:
             t.type = (strcmp(type, "device") == 0)
                      ? TagType::DEVICE
                      : TagType::LOCATION;
+            t.cooldownMs = tag["cooldown_ms"] | 0;
 
             t.actionCount = 0;
             for (JsonObject act : tag["actions"].as<JsonArray>()) {
@@ -229,12 +245,20 @@ public:
         return nullptr;
     }
 
-    // Find a tag by UID string
+    // Find a tag by UID string — returns pointer
     static const TagConfig* findTag(const char* uid,
                                     const ExperienceConfig& cfg) {
         for (uint8_t i = 0; i < cfg.tagCount; i++) {
             if (strcmp(cfg.tags[i].uid, uid) == 0) return &cfg.tags[i];
         }
         return nullptr;
+    }
+
+    // Find a tag by UID string — returns index (-1 if not found)
+    static int8_t findTagIndex(const char* uid, const ExperienceConfig& cfg) {
+        for (uint8_t i = 0; i < cfg.tagCount; i++) {
+            if (strcmp(cfg.tags[i].uid, uid) == 0) return (int8_t)i;
+        }
+        return -1;
     }
 };

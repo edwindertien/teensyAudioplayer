@@ -148,21 +148,8 @@ public:
     }
 
     void play(uint8_t slot) {
-        Serial.printf("[RAM] play() called: slot=%u count=%u loaded=%u buf=%u\n",
-                      slot, RAM_FX_COUNT, _loaded[slot], _buf[slot] != nullptr);
-        if (slot >= RAM_FX_COUNT || !_loaded[slot] || !_buf[slot]) {
-            Serial.printf("[RAM] slot %u guard failed: count=%u loaded=%u buf=%u\n",
-                          slot, RAM_FX_COUNT, (uint8_t)_loaded[slot], _buf[slot] != nullptr);
-            return;
-        }
-        // Debug: print the header word AudioPlayMemory will read
-        uint32_t header = *(uint32_t*)_buf[slot];
-        uint8_t  type   = (header >> 24) & 0xFF;
-        uint32_t blocks = header & 0x00FFFFFF;
-        Serial.printf("[RAM] play slot %u: header=0x%08X type=0x%02X samples=%lu\n",
-                      slot, header, type, blocks);
+        if (slot >= RAM_FX_COUNT || !_loaded[slot] || !_buf[slot]) return;
         player.play((const unsigned int*)_buf[slot]);
-        Serial.printf("[RAM] isPlaying=%s\n", player.isPlaying() ? "YES" : "NO");
     }
 
     bool isPlaying() { return player.isPlaying(); }
