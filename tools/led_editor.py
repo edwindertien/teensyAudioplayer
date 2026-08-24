@@ -239,6 +239,10 @@ input[type=color]{width:0;height:0;opacity:0;position:absolute}
     <button class="btn sec sm" onclick="rotateFrame(1)">↻ Rotate+1</button>
     <button class="btn sec sm" onclick="rotateFrame(-1)">↺ Rotate-1</button>
     <button class="btn sec sm" onclick="mirrorFrame()">⟺ Mirror</button>
+    <div class="tsep"></div>
+    <button class="btn sm" id="btnPlayTools" onclick="togglePlay()">Play</button>
+    <input type="range" min="0.25" max="4" step="0.25" value="1" title="Playback speed" style="width:70px;accent-color:var(--accent)" oninput="playSpeed=parseFloat(this.value);document.getElementById('spdLbl').textContent=this.value+'x'">
+    <span id="spdLbl" style="font-size:10px;color:var(--accent);min-width:28px">1x</span>
     <div class="spacer"></div>
     <span id="ledInfo"></span>
   </div>
@@ -645,8 +649,9 @@ function showFrame(idx){
   const f=anim.frames[currentFrame];
   const total=ledCount(anim.ring||'nfc');
   for(let i=0;i<total;i++) updateLedVisual(i,f.pixels[i]||'#000000');
-  document.getElementById('propFrameMs').value=f.ms||100;
-  document.querySelectorAll('.ft').forEach((el,fi)=>el.classList.toggle('active',fi===currentFrame));
+  const msEl=document.getElementById('propFrameMs'); if(msEl) msEl.value=f.ms||100;
+  const tl=document.getElementById('timeline');
+  if(tl) tl.querySelectorAll('.ft').forEach((el,fi)=>el.classList.toggle('active',fi===currentFrame));
 }
 
 // ── Timeline ──────────────────────────────────────────────────
@@ -844,8 +849,7 @@ function togglePlay(){
 }
 function startPlay(){
   const anim=getAnim(currentId); if(!anim||!anim.frames.length) return;
-  const btnP=document.getElementById('btnPlay');
-  if(btnP) btnP.textContent='⏹ Stop';
+  syncPlayBtn();
   let fi=0;
   function tick(){
     showFrame(fi);
@@ -855,9 +859,10 @@ function startPlay(){
   }
   tick();
 }
+function syncPlayBtn(){const lbl=playInterval?'Stop':'Play';['btnPlay','btnPlayTools'].forEach(id=>{const b=document.getElementById(id);if(b)b.textContent=lbl;});}
 function stopPlay(){
   if(playInterval){clearTimeout(playInterval);playInterval=null;}
-  const b=document.getElementById('btnPlay'); if(b) b.textContent='▶ Play';
+  syncPlayBtn();
 }
 
 // ── Generator ─────────────────────────────────────────────────

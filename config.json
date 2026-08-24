@@ -14,7 +14,7 @@
   "chapters": [
     {
       "id": "intro",
-      "label": "Chapter 1 \u2014 Introduction",
+      "label": "Chapter 1 \u2014 Base (return)",
       "start_ms": 0,
       "loop_end_ms": 32000,
       "on_enter_fx": -1,
